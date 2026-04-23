@@ -209,6 +209,68 @@ struct MixerViewModelTests {
         #expect(a != c)
     }
 
+    // MARK: - ActiveClients (SoundManagerDriver custom property)
+
+    @Test
+    func activeClients_emptyWhenNoSoundManagerDeviceInList() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [AudioDevice.makeStub(id: 10, name: "Speaker")]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.3]
+        mock.activeClientsByDeviceID = [99: [ActiveClient(pid: 1, bundleID: "a")]]
+
+        let vm = MixerViewModel(client: mock)
+
+        #expect(vm.soundManagerDeviceID == nil)
+        #expect(vm.activeClients.isEmpty)
+    }
+
+    @Test
+    func activeClients_populatedFromSoundManagerDevice() {
+        let mock = MockAudioObjectClient()
+        let sm = AudioDevice.makeStub(id: 99, name: "SoundManager", manufacturer: "SoundManager")
+        mock.outputDevicesToReturn = [
+            AudioDevice.makeStub(id: 10, name: "Speaker"),
+            sm
+        ]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.3]
+        mock.activeClientsByDeviceID = [
+            99: [
+                ActiveClient(pid: 111, bundleID: "com.apple.Music"),
+                ActiveClient(pid: 222, bundleID: "com.google.Chrome.helper")
+            ]
+        ]
+
+        let vm = MixerViewModel(client: mock)
+
+        #expect(vm.soundManagerDeviceID == 99)
+        #expect(vm.activeClients.count == 2)
+        #expect(vm.activeClients.first?.bundleID == "com.apple.Music")
+    }
+
+    @Test
+    func activeClients_updateWhenListenerFires() {
+        let mock = MockAudioObjectClient()
+        let sm = AudioDevice.makeStub(id: 99, name: "SoundManager", manufacturer: "SoundManager")
+        mock.outputDevicesToReturn = [sm]
+        mock.defaultOutputDeviceToReturn = 99
+        mock.volumesByID = [99: 0.5]
+        mock.activeClientsByDeviceID = [99: []]
+
+        let vm = MixerViewModel(client: mock)
+        #expect(vm.activeClients.isEmpty)
+
+        // ドライバ側で client 追加を模擬
+        mock.activeClientsByDeviceID[99] = [ActiveClient(pid: 333, bundleID: "com.example.App")]
+        mock.capturedActiveClientsListener?()
+
+        #expect(vm.activeClients.count == 1)
+        #expect(vm.activeClients.first?.pid == 333)
+    }
+
+    // MARK: - 値型契約 (続き)
+
     @Test
     func audioDevice_capabilityFlagsReflectChannelCounts() {
         let speaker = AudioDevice.makeStub(id: 10, name: "Speaker", outputChannels: 2, inputChannels: 0)

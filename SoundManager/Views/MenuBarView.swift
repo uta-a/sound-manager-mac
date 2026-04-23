@@ -16,6 +16,10 @@ struct MenuBarView: View {
 
             Divider()
 
+            activeClientsSection
+
+            Divider()
+
             footer
         }
         .padding(14)
@@ -86,6 +90,49 @@ struct MenuBarView: View {
                 Image(systemName: "speaker.wave.3.fill")
                     .foregroundStyle(.secondary)
                     .font(.caption)
+            }
+        }
+    }
+
+    private var activeClientsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("SoundManager クライアント")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(vm.activeClients.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+
+            if vm.soundManagerDeviceID == nil {
+                Text("SoundManagerDriver が未インストールです")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else if vm.activeClients.isEmpty {
+                Text("(接続中のクライアントなし)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(vm.activeClients.prefix(6)) { c in
+                    HStack(spacing: 6) {
+                        Text(c.bundleID.isEmpty ? "pid \(c.pid)" : c.bundleID)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text("#\(c.pid)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                if vm.activeClients.count > 6 {
+                    Text("…他 \(vm.activeClients.count - 6) 件")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
     }

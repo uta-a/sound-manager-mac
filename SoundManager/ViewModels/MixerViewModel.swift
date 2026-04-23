@@ -10,9 +10,12 @@ final class MixerViewModel {
     private var suppressDeviceWrite = false
     private var defaultOutputListener: PropertyListenerHandle?
     private var volumeListener: PropertyListenerHandle?
+    private var activeClientsListener: PropertyListenerHandle?
 
     private(set) var outputDevices: [AudioDevice] = []
     private(set) var volumeIsReadable: Bool = true
+    private(set) var activeClients: [ActiveClient] = []
+    private(set) var soundManagerDeviceID: AudioDeviceID?
 
     var selectedOutputID: AudioDeviceID? {
         didSet {
@@ -47,6 +50,7 @@ final class MixerViewModel {
             selectedOutputID = currentDefault
         }
         refreshVolume()
+        rebindSoundManagerDevice()
     }
 
     private func startObservingSystem() {
@@ -54,6 +58,7 @@ final class MixerViewModel {
             self?.onDefaultOutputDeviceChanged()
         }
         installVolumeListener()
+        installActiveClientsListener()
     }
 
     private func onDefaultOutputDeviceChanged() {
@@ -93,6 +98,32 @@ final class MixerViewModel {
             volume = newVolume
         }
     }
+
+    // MARK: - SoundManager custom property (active clients)
+
+    private func rebindSoundManagerDevice() {
+        soundManagerDeviceID = outputDevices.first { $0.manufacturer == "SoundManager" }?.id
+        refreshActiveClients()
+        installActiveClientsListener()
+    }
+
+    private func refreshActiveClients() {
+        guard let id = soundManagerDeviceID else {
+            activeClients = []
+            return
+        }
+        activeClients = client.getActiveClients(deviceID: id) ?? []
+    }
+
+    private func installActiveClientsListener() {
+        activeClientsListener = nil
+        guard let id = soundManagerDeviceID else { return }
+        activeClientsListener = client.addActiveClientsListener(deviceID: id) { [weak self] in
+            self?.refreshActiveClients()
+        }
+    }
+
+    // MARK: - helpers
 
     private func withSuppressedWrites(_ body: () -> Void) {
         let previousVolume = suppressVolumeWrite

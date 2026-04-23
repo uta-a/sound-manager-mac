@@ -15,6 +15,11 @@ final class MockAudioObjectClient: AudioObjectClientProtocol {
     var capturedDefaultOutputListener: (() -> Void)?
     var capturedVolumeListener: (() -> Void)?
     var capturedVolumeListenerDeviceID: AudioDeviceID?
+    var capturedActiveClientsListener: (() -> Void)?
+    var capturedActiveClientsListenerDeviceID: AudioDeviceID?
+
+    // kSMCustomPropertyActiveClients をエミュレートする: deviceID 単位で保持する
+    var activeClientsByDeviceID: [AudioDeviceID: [ActiveClient]] = [:]
 
     func enumerateOutputDevices() -> [AudioDevice] {
         enumerateCount += 1
@@ -51,6 +56,16 @@ final class MockAudioObjectClient: AudioObjectClientProtocol {
         capturedVolumeListenerDeviceID = id
         return nil
     }
+
+    func getActiveClients(deviceID: AudioDeviceID) -> [ActiveClient]? {
+        activeClientsByDeviceID[deviceID]
+    }
+
+    func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        capturedActiveClientsListener = handler
+        capturedActiveClientsListenerDeviceID = deviceID
+        return nil
+    }
 }
 
 extension AudioDevice {
@@ -59,13 +74,14 @@ extension AudioDevice {
         name: String,
         outputChannels: Int = 2,
         inputChannels: Int = 0,
-        transport: String = "Virtual"
+        transport: String = "Virtual",
+        manufacturer: String = "Mock Manufacturer"
     ) -> AudioDevice {
         AudioDevice(
             id: id,
             name: name,
             uid: "mock-\(id)",
-            manufacturer: "Mock Manufacturer",
+            manufacturer: manufacturer,
             transport: transport,
             inputChannels: inputChannels,
             outputChannels: outputChannels,

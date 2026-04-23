@@ -39,6 +39,9 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: SoundManager/Info.generated.plist
         MACOSX_DEPLOYMENT_TARGET: "14.4"
+        SWIFT_OBJC_BRIDGING_HEADER: SoundManager/SoundManager-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Shared
 
   SoundManagerTests:
     type: bundle.unit-test

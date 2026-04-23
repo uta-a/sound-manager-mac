@@ -9,11 +9,17 @@ protocol AudioObjectClientProtocol {
     func setOutputVolumeScalar(id: AudioDeviceID, volume: Float) -> Bool
     func addDefaultOutputDeviceListener(_ handler: @escaping () -> Void) -> PropertyListenerHandle?
     func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle?
+
+    // SoundManagerDriver の kSMCustomPropertyActiveClients (カスタムプロパティ)
+    func getActiveClients(deviceID: AudioDeviceID) -> [ActiveClient]?
+    func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle?
 }
 
 extension AudioObjectClientProtocol {
     func addDefaultOutputDeviceListener(_ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
     func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
+    func getActiveClients(deviceID: AudioDeviceID) -> [ActiveClient]? { nil }
+    func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
 }
 
 enum AudioScope {
@@ -130,6 +136,57 @@ struct AudioObjectClient: AudioObjectClientProtocol {
         )
         guard AudioObjectHasProperty(id, &address) else { return nil }
         return addListener(objectID: id, address: address, handler: handler)
+    }
+
+    // MARK: - SoundManager custom property (kSMCustomPropertyActiveClients)
+
+    func getActiveClients(deviceID: AudioDeviceID) -> [ActiveClient]? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kSMCustomPropertyActiveClients,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+
+        var cfList: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFPropertyList>?>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &cfList) == noErr,
+              let list = cfList?.takeRetainedValue() else { return nil }
+
+        guard CFGetTypeID(list) == CFArrayGetTypeID() else { return [] }
+        let array = list as! CFArray
+
+        var clients: [ActiveClient] = []
+        let count = CFArrayGetCount(array)
+        for i in 0..<count {
+            guard let rawDict = CFArrayGetValueAtIndex(array, i) else { continue }
+            let dict = unsafeBitCast(rawDict, to: CFDictionary.self)
+
+            var pid: Int32 = 0
+            let pidKey = "pid" as CFString
+            if let pidValue = CFDictionaryGetValue(dict, Unmanaged.passUnretained(pidKey).toOpaque()) {
+                CFNumberGetValue(unsafeBitCast(pidValue, to: CFNumber.self), .sInt32Type, &pid)
+            }
+
+            var bundleID = ""
+            let bundleKey = "bundleID" as CFString
+            if let bundleValue = CFDictionaryGetValue(dict, Unmanaged.passUnretained(bundleKey).toOpaque()) {
+                bundleID = unsafeBitCast(bundleValue, to: CFString.self) as String
+            }
+
+            clients.append(ActiveClient(pid: pid, bundleID: bundleID))
+        }
+        return clients
+    }
+
+    func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kSMCustomPropertyActiveClients,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+        return addListener(objectID: deviceID, address: address, handler: handler)
     }
 
     // MARK: - Private helpers
