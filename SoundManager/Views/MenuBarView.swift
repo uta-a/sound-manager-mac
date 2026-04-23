@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @State private var vm = MixerViewModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -169,11 +170,13 @@ struct MenuBarView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button("更新") { vm.refresh() }
                 .buttonStyle(.borderless)
+            Button("セットアップ") { openWindow(id: "sound-manager.onboarding") }
+                .buttonStyle(.borderless)
             Spacer()
-            Button("SoundManager を終了") {
+            Button("終了") {
                 NSApplication.shared.terminate(nil)
             }
             .keyboardShortcut("q")

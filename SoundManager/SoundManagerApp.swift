@@ -7,5 +7,10 @@ struct SoundManagerApp: App {
             MenuBarView()
         }
         .menuBarExtraStyle(.window)
+
+        Window("SoundManager セットアップ", id: "sound-manager.onboarding") {
+            OnboardingView()
+        }
+        .windowResizability(.contentSize)
     }
 }
