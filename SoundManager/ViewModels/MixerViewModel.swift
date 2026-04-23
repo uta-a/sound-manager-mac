@@ -11,9 +11,11 @@ final class MixerViewModel {
 
     private var suppressVolumeWrite = false
     private var suppressDeviceWrite = false
+    private var suppressAppVolumesWrite = false
     private var defaultOutputListener: PropertyListenerHandle?
     private var volumeListener: PropertyListenerHandle?
     private var activeClientsListener: PropertyListenerHandle?
+    private var appVolumesListener: PropertyListenerHandle?
 
     private(set) var outputDevices: [AudioDevice] = []
     private(set) var volumeIsReadable: Bool = true
@@ -30,11 +32,16 @@ final class MixerViewModel {
         perAppVolumes[bundleID] ?? 1.0
     }
 
-    /// 指定 bundleID の音量を更新する。M4 で driver に送信する予定。
+    /// 指定 bundleID の音量を更新する。
+    /// Driver の kSMCustomPropertyAppVolumes に全マップを書き込み、
+    /// Handler::OnProcessClientOutput で対応する client の音量が実際に変わる。
     func setVolume(_ value: Double, for bundleID: String) {
         let clamped = max(0, min(1, value))
         perAppVolumes[bundleID] = clamped
-        // TODO(M4): driver の kSMCustomPropertyAppVolumes 相当に反映する
+        if suppressAppVolumesWrite { return }
+        guard let id = soundManagerDeviceID else { return }
+        let driverMap = perAppVolumes.mapValues { Float($0) }
+        _ = client.setAppVolumes(deviceID: id, volumes: driverMap)
     }
 
     var selectedOutputID: AudioDeviceID? {
@@ -129,6 +136,24 @@ final class MixerViewModel {
         soundManagerDeviceID = outputDevices.first { $0.manufacturer == "SoundManager" }?.id
         refreshActiveClients()
         installActiveClientsListener()
+        refreshAppVolumes()
+        installAppVolumesListener()
+    }
+
+    private func refreshAppVolumes() {
+        guard let id = soundManagerDeviceID,
+              let driverMap = client.getAppVolumes(deviceID: id) else { return }
+        suppressAppVolumesWrite = true
+        defer { suppressAppVolumesWrite = false }
+        perAppVolumes = driverMap.mapValues { Double($0) }
+    }
+
+    private func installAppVolumesListener() {
+        appVolumesListener = nil
+        guard let id = soundManagerDeviceID else { return }
+        appVolumesListener = client.addAppVolumesListener(deviceID: id) { [weak self] in
+            self?.refreshAppVolumes()
+        }
     }
 
     private func refreshActiveClients() {

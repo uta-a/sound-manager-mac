@@ -1,17 +1,16 @@
-// SoundManagerDriver - M3a+M3b ext: 仮想デバイス + 再生中クライアント検出
+// SoundManagerDriver - M3 + M4a: 仮想デバイス + 再生中 client 検出 + per-app gain
 //
 // libASPL を利用し、以下を提供する:
 //   1. SoundManager 仮想出力デバイス (Float32 stereo, 44.1/48/96 kHz)
-//   2. クライアント (PID, bundleID) の接続・再生状態の追跡
-//   3. カスタムプロパティ kSMCustomPropertyActiveClients を通じて
-//      「現在 I/O 中 (実際に音を書込中) の client」のみを UI に公開
+//   2. クライアント (PID, bundleID) の接続・I/O 状態の追跡
+//      (Device::StartIOImpl / StopIOImpl を override し client-specific に管理)
+//   3. カスタムプロパティ kSMCustomPropertyActiveClients (read-only)
+//      I/O 中の client のみ { pid, bundleID } で公開
+//   4. カスタムプロパティ kSMCustomPropertyAppVolumes (read/write)
+//      UI から bundleID 単位で gain を設定する。Driver は
+//      IORequestHandler::OnProcessClientOutput でバッファに gain を乗算する。
 //
-// 単に Audio Device を列挙・購読しているだけのシステムサービス (coreaudiod 等) は
-// I/O を開始しないため、UI には出ない。I/O 状態の追跡は Device::StartIOImpl /
-// StopIOImpl を override することで行う (これらは clientID 付きで呼ばれる)。
-//
-// 音声データ自体は依然として破棄される (SilentHandler 挙動)。M4 で per-client gain
-// 処理とループバック入力ストリームを追加予定。
+// M4 で次にやること: ループバック入力ストリームを追加し mixer として完成させる。
 
 #include "../Shared/SMTypes.h"
 
@@ -20,6 +19,7 @@
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -46,7 +46,6 @@ AudioStreamBasicDescription MakeFloat32StereoASBD(Float64 sample_rate) {
     return desc;
 }
 
-// クライアント情報 + 現時点で I/O 中かどうか
 struct ClientRecord {
     pid_t pid = 0;
     std::string bundle_id;
@@ -54,13 +53,10 @@ struct ClientRecord {
 };
 
 // ControlRequestHandler + IORequestHandler を兼ねるハンドラ。
-// クライアント管理と (Device 側からの) I/O 状態通知の受け皿を提供する。
+// クライアント管理、I/O 状態追跡、per-client gain の適用を担う。
 class Handler : public aspl::ControlRequestHandler, public aspl::IORequestHandler {
 public:
-    OSStatus OnStartIO() override {
-        return kAudioHardwareNoError;
-    }
-
+    OSStatus OnStartIO() override { return kAudioHardwareNoError; }
     void OnStopIO() override {}
 
     std::shared_ptr<aspl::Client> OnAddClient(const aspl::ClientInfo& info) override {
@@ -71,7 +67,7 @@ public:
                 info.ClientID,
                 ClientRecord{info.ProcessID, info.BundleID, false});
         }
-        NotifyClientsChanged();
+        NotifyActiveClientsChanged();
         return client;
     }
 
@@ -80,11 +76,10 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             clients_.erase(client->GetClientID());
         }
-        NotifyClientsChanged();
+        NotifyActiveClientsChanged();
         aspl::ControlRequestHandler::OnRemoveClient(client);
     }
 
-    // Device の StartIOImpl / StopIOImpl から呼ばれる。clientID ごとに I/O 状態を記録する。
     void MarkClientIOStarted(UInt32 client_id) {
         bool changed = false;
         {
@@ -96,7 +91,7 @@ public:
                 }
             }
         }
-        if (changed) NotifyClientsChanged();
+        if (changed) NotifyActiveClientsChanged();
     }
 
     void MarkClientIOStopped(UInt32 client_id) {
@@ -110,11 +105,10 @@ public:
                 }
             }
         }
-        if (changed) NotifyClientsChanged();
+        if (changed) NotifyActiveClientsChanged();
     }
 
-    // kSMCustomPropertyActiveClients の getter。
-    // I/O 中 (io_active == true) の client だけを返す。
+    // I/O 中 (io_active) の client のみ返す。
     CFPropertyListRef CopyActiveClients() const {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -135,12 +129,12 @@ public:
             CFDictionarySetValue(dict, CFSTR(kSMClientInfoKey_PID), pid_number);
             CFRelease(pid_number);
 
-            CFStringRef bundle_id = CFStringCreateWithCString(
+            CFStringRef bundle_id_ref = CFStringCreateWithCString(
                 kCFAllocatorDefault,
                 record.bundle_id.c_str(),
                 kCFStringEncodingUTF8);
-            CFDictionarySetValue(dict, CFSTR(kSMClientInfoKey_BundleID), bundle_id);
-            CFRelease(bundle_id);
+            CFDictionarySetValue(dict, CFSTR(kSMClientInfoKey_BundleID), bundle_id_ref);
+            CFRelease(bundle_id_ref);
 
             CFArrayAppendValue(array, dict);
             CFRelease(dict);
@@ -148,12 +142,112 @@ public:
         return array;
     }
 
+    // kSMCustomPropertyAppVolumes getter.
+    // 現在保持している { bundleID: gain } マップを CFArray<CFDictionary> で返す。
+    CFPropertyListRef CopyAppVolumes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        CFMutableArrayRef array = CFArrayCreateMutable(
+            kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+
+        for (const auto& [bundle_id, gain] : bundle_gains_) {
+            CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+                kCFAllocatorDefault, 2,
+                &kCFCopyStringDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks);
+
+            CFStringRef bundle_ref = CFStringCreateWithCString(
+                kCFAllocatorDefault, bundle_id.c_str(), kCFStringEncodingUTF8);
+            CFDictionarySetValue(dict, CFSTR(kSMAppVolumeKey_BundleID), bundle_ref);
+            CFRelease(bundle_ref);
+
+            Float32 gain_value = gain;
+            CFNumberRef gain_ref = CFNumberCreate(
+                kCFAllocatorDefault, kCFNumberFloat32Type, &gain_value);
+            CFDictionarySetValue(dict, CFSTR(kSMAppVolumeKey_Gain), gain_ref);
+            CFRelease(gain_ref);
+
+            CFArrayAppendValue(array, dict);
+            CFRelease(dict);
+        }
+        return array;
+    }
+
+    // kSMCustomPropertyAppVolumes setter.
+    // 受け取った CFArray<CFDict> で bundle_gains_ 全体を置き換える。
+    // value の所有権は caller 側なので CFRetain は不要。
+    void SetAppVolumes(CFPropertyListRef value) {
+        if (value == nullptr) return;
+        if (CFGetTypeID(value) != CFArrayGetTypeID()) return;
+
+        CFArrayRef array = static_cast<CFArrayRef>(value);
+        CFIndex count = CFArrayGetCount(array);
+
+        std::map<std::string, Float32> new_map;
+        for (CFIndex i = 0; i < count; ++i) {
+            CFTypeRef raw = CFArrayGetValueAtIndex(array, i);
+            if (!raw || CFGetTypeID(raw) != CFDictionaryGetTypeID()) continue;
+            CFDictionaryRef dict = static_cast<CFDictionaryRef>(raw);
+
+            CFStringRef bundle_ref = static_cast<CFStringRef>(
+                CFDictionaryGetValue(dict, CFSTR(kSMAppVolumeKey_BundleID)));
+            CFNumberRef gain_ref = static_cast<CFNumberRef>(
+                CFDictionaryGetValue(dict, CFSTR(kSMAppVolumeKey_Gain)));
+            if (!bundle_ref || !gain_ref) continue;
+
+            char buf[256] = {0};
+            if (!CFStringGetCString(bundle_ref, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                continue;
+            }
+            Float32 gain = 1.0f;
+            CFNumberGetValue(gain_ref, kCFNumberFloat32Type, &gain);
+            new_map[buf] = std::max(0.0f, std::min(4.0f, gain));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            bundle_gains_ = std::move(new_map);
+        }
+        NotifyAppVolumesChanged();
+    }
+
+    // Realtime thread から呼ばれる。ここで per-client gain を適用する。
+    // libASPL のデフォルト実装は stream->ApplyProcessing(...) を呼ぶので、
+    // その動作を残したうえで gain 乗算を追加する。
+    //
+    // mutex はリアルタイム的にはアンチパターンだが、M4a の最小実装では妥協する。
+    // M4e で DoubleBuffer or atomic スナップショットに最適化する予定。
+    void OnProcessClientOutput(const std::shared_ptr<aspl::Client>& client,
+        const std::shared_ptr<aspl::Stream>& stream,
+        Float64 /*zeroTimestamp*/,
+        Float64 /*timestamp*/,
+        Float32* frames,
+        UInt32 frameCount,
+        UInt32 channelCount) override {
+        stream->ApplyProcessing(frames, frameCount, channelCount);
+
+        Float32 gain = LookupGainForClient(client->GetClientID());
+        if (gain == 1.0f) return;
+
+        const UInt32 total = frameCount * channelCount;
+        for (UInt32 i = 0; i < total; ++i) {
+            frames[i] *= gain;
+        }
+    }
+
     void SetDevice(std::weak_ptr<aspl::Device> device) {
         device_ = std::move(device);
     }
 
 private:
-    void NotifyClientsChanged() {
+    Float32 LookupGainForClient(UInt32 client_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto client_it = clients_.find(client_id);
+        if (client_it == clients_.end()) return 1.0f;
+        auto gain_it = bundle_gains_.find(client_it->second.bundle_id);
+        return gain_it == bundle_gains_.end() ? 1.0f : gain_it->second;
+    }
+
+    void NotifyActiveClientsChanged() {
         if (auto device = device_.lock()) {
             device->NotifyPropertyChanged(
                 kSMCustomPropertyActiveClients,
@@ -162,13 +256,22 @@ private:
         }
     }
 
+    void NotifyAppVolumesChanged() {
+        if (auto device = device_.lock()) {
+            device->NotifyPropertyChanged(
+                kSMCustomPropertyAppVolumes,
+                kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain);
+        }
+    }
+
     mutable std::mutex mutex_;
     std::map<UInt32, ClientRecord> clients_;
+    std::map<std::string, Float32> bundle_gains_;
     std::weak_ptr<aspl::Device> device_;
 };
 
-// aspl::Device を継承して StartIOImpl / StopIOImpl をオーバーライドする。
-// これにより、client 単位の I/O 開始/終了を Handler に伝える。
+// Device::StartIOImpl / StopIOImpl を override して client-specific な I/O 追跡を行う。
 class TrackingDevice : public aspl::Device {
 public:
     using aspl::Device::Device;
@@ -208,7 +311,6 @@ std::shared_ptr<aspl::Driver> CreateSoundManagerDriver() {
     auto device = std::make_shared<TrackingDevice>(context, device_params);
     device->AddStreamWithControlsAsync(aspl::Direction::Output);
 
-    // Device レベル: 対応 sample rate を複数登録
     std::vector<AudioValueRange> sample_rate_ranges;
     sample_rate_ranges.reserve(std::size(kSupportedSampleRates));
     for (Float64 rate : kSupportedSampleRates) {
@@ -216,7 +318,6 @@ std::shared_ptr<aspl::Driver> CreateSoundManagerDriver() {
     }
     device->SetAvailableSampleRatesAsync(sample_rate_ranges);
 
-    // Stream レベル: Float32 stereo の available formats を複数登録
     if (auto stream = device->GetStreamByIndex(aspl::Direction::Output, 0)) {
         std::vector<AudioStreamRangedDescription> formats;
         formats.reserve(std::size(kSupportedSampleRates));
@@ -241,6 +342,12 @@ std::shared_ptr<aspl::Driver> CreateSoundManagerDriver() {
         kSMCustomPropertyActiveClients,
         *handler,
         &Handler::CopyActiveClients);
+
+    device->RegisterCustomProperty(
+        kSMCustomPropertyAppVolumes,
+        *handler,
+        &Handler::CopyAppVolumes,
+        &Handler::SetAppVolumes);
 
     auto plugin = std::make_shared<aspl::Plugin>(context);
     plugin->AddDevice(device);

@@ -66,6 +66,28 @@ final class MockAudioObjectClient: AudioObjectClientProtocol {
         capturedActiveClientsListenerDeviceID = deviceID
         return nil
     }
+
+    // kSMCustomPropertyAppVolumes スタブ
+    var appVolumesByDeviceID: [AudioDeviceID: [String: Float]] = [:]
+    private(set) var setAppVolumesCalls: [(deviceID: AudioDeviceID, volumes: [String: Float])] = []
+    var capturedAppVolumesListener: (() -> Void)?
+    var capturedAppVolumesListenerDeviceID: AudioDeviceID?
+
+    func getAppVolumes(deviceID: AudioDeviceID) -> [String: Float]? {
+        appVolumesByDeviceID[deviceID]
+    }
+
+    func setAppVolumes(deviceID: AudioDeviceID, volumes: [String: Float]) -> Bool {
+        setAppVolumesCalls.append((deviceID, volumes))
+        appVolumesByDeviceID[deviceID] = volumes
+        return true
+    }
+
+    func addAppVolumesListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        capturedAppVolumesListener = handler
+        capturedAppVolumesListenerDeviceID = deviceID
+        return nil
+    }
 }
 
 extension AudioDevice {

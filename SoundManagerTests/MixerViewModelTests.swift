@@ -134,6 +134,76 @@ struct MixerViewModelTests {
         #expect(mock.setVolumeCalls.count == setVolumeBaseline)
     }
 
+    // MARK: - per-app volume driver 連携
+
+    @Test
+    func perAppVolume_setCallsSetAppVolumesOnDriver() {
+        let mock = MockAudioObjectClient()
+        let sm = AudioDevice.makeStub(id: 99, name: "SoundManager", manufacturer: "SoundManager")
+        mock.outputDevicesToReturn = [sm]
+        mock.defaultOutputDeviceToReturn = 99
+        mock.volumesByID = [99: 0.5]
+
+        let vm = MixerViewModel(client: mock)
+        let baseline = mock.setAppVolumesCalls.count
+
+        vm.setVolume(0.7, for: "com.apple.Music")
+
+        #expect(mock.setAppVolumesCalls.count == baseline + 1)
+        let last = mock.setAppVolumesCalls.last
+        #expect(last?.deviceID == 99)
+        #expect(abs((last?.volumes["com.apple.Music"] ?? 0) - 0.7) < 0.0001)
+    }
+
+    @Test
+    func perAppVolume_setDoesNotCallDriverWhenNoSoundManager() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [AudioDevice.makeStub(id: 10, name: "Speaker")]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.3]
+
+        let vm = MixerViewModel(client: mock)
+        let baseline = mock.setAppVolumesCalls.count
+
+        vm.setVolume(0.5, for: "com.apple.Music")
+
+        #expect(mock.setAppVolumesCalls.count == baseline)
+        #expect(abs(vm.volume(for: "com.apple.Music") - 0.5) < 0.0001)
+    }
+
+    @Test
+    func perAppVolume_refreshLoadsFromDriverAtInit() {
+        let mock = MockAudioObjectClient()
+        let sm = AudioDevice.makeStub(id: 99, name: "SoundManager", manufacturer: "SoundManager")
+        mock.outputDevicesToReturn = [sm]
+        mock.defaultOutputDeviceToReturn = 99
+        mock.volumesByID = [99: 0.5]
+        mock.appVolumesByDeviceID = [99: ["com.apple.Music": 0.6]]
+
+        let vm = MixerViewModel(client: mock)
+        #expect(abs(vm.volume(for: "com.apple.Music") - 0.6) < 0.0001)
+    }
+
+    @Test
+    func perAppVolume_externalChangeRefreshesWithoutCallingDriver() {
+        let mock = MockAudioObjectClient()
+        let sm = AudioDevice.makeStub(id: 99, name: "SoundManager", manufacturer: "SoundManager")
+        mock.outputDevicesToReturn = [sm]
+        mock.defaultOutputDeviceToReturn = 99
+        mock.volumesByID = [99: 0.5]
+        mock.appVolumesByDeviceID = [99: [:]]
+
+        let vm = MixerViewModel(client: mock)
+        let baseline = mock.setAppVolumesCalls.count
+
+        mock.appVolumesByDeviceID[99] = ["com.apple.Music": 0.3, "com.google.Chrome": 0.8]
+        mock.capturedAppVolumesListener?()
+
+        #expect(abs(vm.volume(for: "com.apple.Music") - 0.3) < 0.0001)
+        #expect(abs(vm.volume(for: "com.google.Chrome") - 0.8) < 0.0001)
+        #expect(mock.setAppVolumesCalls.count == baseline)
+    }
+
     // MARK: - 外部変化 (CoreAudio property listener 経由)
 
     @Test

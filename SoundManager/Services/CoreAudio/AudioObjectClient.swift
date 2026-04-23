@@ -13,6 +13,11 @@ protocol AudioObjectClientProtocol {
     // SoundManagerDriver の kSMCustomPropertyActiveClients (カスタムプロパティ)
     func getActiveClients(deviceID: AudioDeviceID) -> [ActiveClient]?
     func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle?
+
+    // SoundManagerDriver の kSMCustomPropertyAppVolumes (read/write)
+    func getAppVolumes(deviceID: AudioDeviceID) -> [String: Float]?
+    func setAppVolumes(deviceID: AudioDeviceID, volumes: [String: Float]) -> Bool
+    func addAppVolumesListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle?
 }
 
 extension AudioObjectClientProtocol {
@@ -20,6 +25,9 @@ extension AudioObjectClientProtocol {
     func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
     func getActiveClients(deviceID: AudioDeviceID) -> [ActiveClient]? { nil }
     func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
+    func getAppVolumes(deviceID: AudioDeviceID) -> [String: Float]? { nil }
+    func setAppVolumes(deviceID: AudioDeviceID, volumes: [String: Float]) -> Bool { false }
+    func addAppVolumesListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
 }
 
 enum AudioScope {
@@ -182,6 +190,83 @@ struct AudioObjectClient: AudioObjectClientProtocol {
     func addActiveClientsListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
         var address = AudioObjectPropertyAddress(
             mSelector: kSMCustomPropertyActiveClients,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+        return addListener(objectID: deviceID, address: address, handler: handler)
+    }
+
+    // MARK: - SoundManager custom property (kSMCustomPropertyAppVolumes, read/write)
+
+    func getAppVolumes(deviceID: AudioDeviceID) -> [String: Float]? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kSMCustomPropertyAppVolumes,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+
+        var cfList: Unmanaged<CFPropertyList>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFPropertyList>?>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &cfList) == noErr,
+              let list = cfList?.takeRetainedValue() else { return nil }
+
+        guard CFGetTypeID(list) == CFArrayGetTypeID() else { return [:] }
+        let array = list as! CFArray
+
+        var result: [String: Float] = [:]
+        let count = CFArrayGetCount(array)
+        for i in 0..<count {
+            guard let rawDict = CFArrayGetValueAtIndex(array, i) else { continue }
+            let dict = unsafeBitCast(rawDict, to: CFDictionary.self)
+
+            var bundleID = ""
+            let bundleKey = "bundleID" as CFString
+            if let v = CFDictionaryGetValue(dict, Unmanaged.passUnretained(bundleKey).toOpaque()) {
+                bundleID = unsafeBitCast(v, to: CFString.self) as String
+            }
+
+            var gain: Float = 1.0
+            let gainKey = "gain" as CFString
+            if let v = CFDictionaryGetValue(dict, Unmanaged.passUnretained(gainKey).toOpaque()) {
+                CFNumberGetValue(unsafeBitCast(v, to: CFNumber.self), .floatType, &gain)
+            }
+
+            if !bundleID.isEmpty {
+                result[bundleID] = gain
+            }
+        }
+        return result
+    }
+
+    func setAppVolumes(deviceID: AudioDeviceID, volumes: [String: Float]) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kSMCustomPropertyAppVolumes,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return false }
+
+        let array = NSMutableArray()
+        for (bundleID, gain) in volumes {
+            let dict = NSMutableDictionary()
+            dict["bundleID"] = bundleID
+            dict["gain"] = NSNumber(value: gain)
+            array.add(dict)
+        }
+
+        var cfValue = array as CFArray as CFPropertyList
+        let size = UInt32(MemoryLayout<CFPropertyList>.size)
+        let status = withUnsafePointer(to: &cfValue) { ptr -> OSStatus in
+            AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, ptr)
+        }
+        return status == noErr
+    }
+
+    func addAppVolumesListener(deviceID: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kSMCustomPropertyAppVolumes,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
