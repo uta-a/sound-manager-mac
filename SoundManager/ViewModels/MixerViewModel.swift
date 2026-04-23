@@ -8,6 +8,8 @@ import Observation
 final class MixerViewModel {
     private let client: AudioObjectClientProtocol
     private let runningApps: RunningAppsMonitor
+    private let loopback = LoopbackEngine()
+    private let ownBundleID: String = Bundle.main.bundleIdentifier ?? ""
 
     private var suppressVolumeWrite = false
     private var suppressDeviceWrite = false
@@ -16,6 +18,10 @@ final class MixerViewModel {
     private var volumeListener: PropertyListenerHandle?
     private var activeClientsListener: PropertyListenerHandle?
     private var appVolumesListener: PropertyListenerHandle?
+
+    /// SoundManager が既定出力になる前の実出力デバイス ID。
+    /// SoundManager 選択時に、これを LoopbackEngine の出力先として使う。
+    private var lastPhysicalOutputID: AudioDeviceID?
 
     private(set) var outputDevices: [AudioDevice] = []
     private(set) var volumeIsReadable: Bool = true
@@ -51,6 +57,7 @@ final class MixerViewModel {
             if client.setDefaultOutputDevice(id: id) {
                 refreshVolume()
                 installVolumeListener()
+                updateLoopback()
             }
         }
     }
@@ -82,6 +89,7 @@ final class MixerViewModel {
         }
         refreshVolume()
         rebindSoundManagerDevice()
+        updateLoopback()
     }
 
     private func startObservingSystem() {
@@ -103,6 +111,7 @@ final class MixerViewModel {
         }
         refreshVolume()
         installVolumeListener()
+        updateLoopback()
     }
 
     private func installVolumeListener() {
@@ -177,9 +186,34 @@ final class MixerViewModel {
     // MARK: - ActiveApp: raw ActiveClient をフィルタ + グルーピング
 
     private func rebuildActiveApps() {
-        activeApps = ProcessGrouping.buildActiveApps(from: activeClients) { [runningApps] bundleID in
+        activeApps = ProcessGrouping.buildActiveApps(
+            from: activeClients,
+            excludingBundleIDs: ownBundleID.isEmpty ? [] : [ownBundleID]
+        ) { [runningApps] bundleID in
             guard let info = runningApps.appsByBundleID[bundleID] else { return nil }
             return (info.displayName, info.icon)
+        }
+    }
+
+    // MARK: - Loopback: SoundManager → 実出力デバイス
+
+    /// selectedOutputID が SoundManager のとき、直前の実出力デバイスに loopback する。
+    /// そうでないときは実出力を覚えておき、loopback は停止する。
+    private func updateLoopback() {
+        guard let selected = selectedOutputID else {
+            loopback.stop()
+            return
+        }
+        if selected == soundManagerDeviceID {
+            // SoundManager を既定にした場合、直前に使っていた実出力へ loopback
+            guard let target = lastPhysicalOutputID, target != selected else {
+                loopback.stop()
+                return
+            }
+            loopback.start(input: selected, output: target)
+        } else {
+            lastPhysicalOutputID = selected
+            loopback.stop()
         }
     }
 

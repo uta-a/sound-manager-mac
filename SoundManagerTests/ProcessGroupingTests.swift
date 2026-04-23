@@ -101,4 +101,20 @@ struct ProcessGroupingTests {
         let apps = ProcessGrouping.buildActiveApps(from: []) { _ in nil }
         #expect(apps.isEmpty)
     }
+
+    @Test
+    func buildActiveApps_excludesSelfBundle() {
+        let clients = [
+            ActiveClient(pid: 100, bundleID: "io.github.uta-a.SoundManager"),
+            ActiveClient(pid: 200, bundleID: "com.apple.Music"),
+        ]
+        let apps = ProcessGrouping.buildActiveApps(
+            from: clients,
+            excludingBundleIDs: ["io.github.uta-a.SoundManager"]
+        ) { bundleID in
+            bundleID == "com.apple.Music" ? ("ミュージック", nil) : nil
+        }
+        #expect(apps.count == 1)
+        #expect(apps.first?.bundleID == "com.apple.Music")
+    }
 }

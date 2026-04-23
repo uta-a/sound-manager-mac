@@ -47,8 +47,10 @@ enum ProcessGrouping {
     /// 生の ActiveClient リストを正規化・除外・グルーピングして UI 用 ActiveApp 配列に変換する。
     /// `appInfoForBundleID` は NSWorkspace などからの情報取得をテストで差し替え可能にするためのクロージャ。
     /// bundleID が解決できない場合は displayName = bundleID として残す (完全な除外はしない)。
+    /// `excludingBundleIDs` には SoundManager.app 自身の bundleID などを指定して UI から消す。
     static func buildActiveApps(
         from clients: [ActiveClient],
+        excludingBundleIDs: Set<String> = [],
         appInfoForBundleID: (String) -> (displayName: String, icon: NSImage?)?
     ) -> [ActiveApp] {
         var byBundleID: [String: (displayName: String, icon: NSImage?, pids: [Int32])] = [:]
@@ -57,6 +59,7 @@ enum ProcessGrouping {
             let normalized = normalize(client.bundleID)
             if normalized.isEmpty { continue }
             if isSystemBundle(normalized) { continue }
+            if excludingBundleIDs.contains(normalized) { continue }
 
             let info = appInfoForBundleID(normalized)
             let displayName = info?.displayName ?? normalized

@@ -1,16 +1,18 @@
-// SoundManagerDriver - M3 + M4a: 仮想デバイス + 再生中 client 検出 + per-app gain
+// SoundManagerDriver - M4a/M4b: 仮想デバイス + per-app gain + ループバック入力
 //
 // libASPL を利用し、以下を提供する:
-//   1. SoundManager 仮想出力デバイス (Float32 stereo, 44.1/48/96 kHz)
-//   2. クライアント (PID, bundleID) の接続・I/O 状態の追跡
-//      (Device::StartIOImpl / StopIOImpl を override し client-specific に管理)
-//   3. カスタムプロパティ kSMCustomPropertyActiveClients (read-only)
-//      I/O 中の client のみ { pid, bundleID } で公開
-//   4. カスタムプロパティ kSMCustomPropertyAppVolumes (read/write)
-//      UI から bundleID 単位で gain を設定する。Driver は
-//      IORequestHandler::OnProcessClientOutput でバッファに gain を乗算する。
+//   1. SoundManager 仮想デバイス (Float32 stereo, 44.1/48/96 kHz)
+//      Output stream (アプリからの書込み) と Input stream (ループバック読取) の
+//      両方向を持つ。同一 Device 上の両端点なので SampleRate / ChannelCount が一致する。
+//   2. クライアント (PID, bundleID) 追跡と kSMCustomPropertyActiveClients (read-only)
+//   3. kSMCustomPropertyAppVolumes (read/write)
+//      OnProcessClientOutput で per-client の gain をバッファに乗算する。
+//   4. OnWriteMixedOutput で mixed 後の bytes を内部リングバッファに push、
+//      OnReadClientInput で pop して Input stream の client に渡す。
+//      これにより SoundManager.app の LoopbackEngine が選択した実出力デバイスへ
+//      音を流せるようになる。
 //
-// M4 で次にやること: ループバック入力ストリームを追加し mixer として完成させる。
+// ロックは std::mutex で単純化している (M4e で DoubleBuffer / atomic 化予定)。
 
 #include "../Shared/SMTypes.h"
 
@@ -20,6 +22,9 @@
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -31,6 +36,11 @@ namespace {
 constexpr Float64 kSupportedSampleRates[] = {44100.0, 48000.0, 96000.0};
 constexpr UInt32 kChannelCount = 2;
 constexpr Float64 kDefaultSampleRate = 48000.0;
+
+// ループバックバッファの最大サンプル数 (Float32 interleaved stereo)。
+// 96kHz × 2ch × 1 秒分のゆとり。overflow 時は古いサンプルを捨てる (最新優先)。
+constexpr std::size_t kLoopbackBufferSamples =
+    static_cast<std::size_t>(96000 * 2 * 1);
 
 AudioStreamBasicDescription MakeFloat32StereoASBD(Float64 sample_rate) {
     AudioStreamBasicDescription desc{};
@@ -52,12 +62,46 @@ struct ClientRecord {
     bool io_active = false;
 };
 
-// ControlRequestHandler + IORequestHandler を兼ねるハンドラ。
-// クライアント管理、I/O 状態追跡、per-client gain の適用を担う。
+// シンプルな FIFO サンプルキュー。realtime スレッドから push/pop される。
+// mutex ロックはアンチパターン気味だが M4b の最小実装として許容。M4e で改良。
+class LoopbackBuffer {
+public:
+    void Push(const Float32* data, std::size_t samples) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (std::size_t i = 0; i < samples; ++i) {
+            queue_.push_back(data[i]);
+        }
+        while (queue_.size() > kLoopbackBufferSamples) {
+            queue_.pop_front();
+        }
+    }
+
+    void Pop(Float32* dst, std::size_t samples) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (std::size_t i = 0; i < samples; ++i) {
+            if (queue_.empty()) {
+                dst[i] = 0.0f;  // underflow → zero fill
+            } else {
+                dst[i] = queue_.front();
+                queue_.pop_front();
+            }
+        }
+    }
+
+    void Reset() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.clear();
+    }
+
+private:
+    std::deque<Float32> queue_;
+    std::mutex mutex_;
+};
+
 class Handler : public aspl::ControlRequestHandler, public aspl::IORequestHandler {
 public:
     OSStatus OnStartIO() override { return kAudioHardwareNoError; }
-    void OnStopIO() override {}
+    void OnStopIO() override { loopback_.Reset(); }
 
     std::shared_ptr<aspl::Client> OnAddClient(const aspl::ClientInfo& info) override {
         auto client = aspl::ControlRequestHandler::OnAddClient(info);
@@ -108,7 +152,6 @@ public:
         if (changed) NotifyActiveClientsChanged();
     }
 
-    // I/O 中 (io_active) の client のみ返す。
     CFPropertyListRef CopyActiveClients() const {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -142,8 +185,6 @@ public:
         return array;
     }
 
-    // kSMCustomPropertyAppVolumes getter.
-    // 現在保持している { bundleID: gain } マップを CFArray<CFDictionary> で返す。
     CFPropertyListRef CopyAppVolumes() const {
         std::lock_guard<std::mutex> lock(mutex_);
         CFMutableArrayRef array = CFArrayCreateMutable(
@@ -172,9 +213,6 @@ public:
         return array;
     }
 
-    // kSMCustomPropertyAppVolumes setter.
-    // 受け取った CFArray<CFDict> で bundle_gains_ 全体を置き換える。
-    // value の所有権は caller 側なので CFRetain は不要。
     void SetAppVolumes(CFPropertyListRef value) {
         if (value == nullptr) return;
         if (CFGetTypeID(value) != CFArrayGetTypeID()) return;
@@ -210,12 +248,7 @@ public:
         NotifyAppVolumesChanged();
     }
 
-    // Realtime thread から呼ばれる。ここで per-client gain を適用する。
-    // libASPL のデフォルト実装は stream->ApplyProcessing(...) を呼ぶので、
-    // その動作を残したうえで gain 乗算を追加する。
-    //
-    // mutex はリアルタイム的にはアンチパターンだが、M4a の最小実装では妥協する。
-    // M4e で DoubleBuffer or atomic スナップショットに最適化する予定。
+    // Realtime: per-client gain 乗算 (mix 前)
     void OnProcessClientOutput(const std::shared_ptr<aspl::Client>& client,
         const std::shared_ptr<aspl::Stream>& stream,
         Float64 /*zeroTimestamp*/,
@@ -232,6 +265,28 @@ public:
         for (UInt32 i = 0; i < total; ++i) {
             frames[i] *= gain;
         }
+    }
+
+    // Realtime: mix 後の Float32 interleaved bytes をループバックバッファに蓄積。
+    // bytes は Float32 stereo interleaved であることを期待 (Stream format より保証)。
+    void OnWriteMixedOutput(const std::shared_ptr<aspl::Stream>& /*stream*/,
+        Float64 /*zeroTimestamp*/,
+        Float64 /*timestamp*/,
+        const void* bytes,
+        UInt32 bytesCount) override {
+        const std::size_t samples = bytesCount / sizeof(Float32);
+        loopback_.Push(static_cast<const Float32*>(bytes), samples);
+    }
+
+    // Realtime: Input client (LoopbackEngine) にループバックバッファの内容を返す。
+    void OnReadClientInput(const std::shared_ptr<aspl::Client>& /*client*/,
+        const std::shared_ptr<aspl::Stream>& /*stream*/,
+        Float64 /*zeroTimestamp*/,
+        Float64 /*timestamp*/,
+        void* bytes,
+        UInt32 bytesCount) override {
+        const std::size_t samples = bytesCount / sizeof(Float32);
+        loopback_.Pop(static_cast<Float32*>(bytes), samples);
     }
 
     void SetDevice(std::weak_ptr<aspl::Device> device) {
@@ -269,9 +324,9 @@ private:
     std::map<UInt32, ClientRecord> clients_;
     std::map<std::string, Float32> bundle_gains_;
     std::weak_ptr<aspl::Device> device_;
+    LoopbackBuffer loopback_;
 };
 
-// Device::StartIOImpl / StopIOImpl を override して client-specific な I/O 追跡を行う。
 class TrackingDevice : public aspl::Device {
 public:
     using aspl::Device::Device;
@@ -309,7 +364,10 @@ std::shared_ptr<aspl::Driver> CreateSoundManagerDriver() {
     device_params.EnableMixing = true;
 
     auto device = std::make_shared<TrackingDevice>(context, device_params);
+
+    // Output (アプリからの書込み) と Input (LoopbackEngine からの読取) の両方を追加
     device->AddStreamWithControlsAsync(aspl::Direction::Output);
+    device->AddStreamWithControlsAsync(aspl::Direction::Input);
 
     std::vector<AudioValueRange> sample_rate_ranges;
     sample_rate_ranges.reserve(std::size(kSupportedSampleRates));
@@ -318,18 +376,23 @@ std::shared_ptr<aspl::Driver> CreateSoundManagerDriver() {
     }
     device->SetAvailableSampleRatesAsync(sample_rate_ranges);
 
-    if (auto stream = device->GetStreamByIndex(aspl::Direction::Output, 0)) {
-        std::vector<AudioStreamRangedDescription> formats;
-        formats.reserve(std::size(kSupportedSampleRates));
-        for (Float64 rate : kSupportedSampleRates) {
-            AudioStreamRangedDescription desc{};
-            desc.mFormat = MakeFloat32StereoASBD(rate);
-            desc.mSampleRateRange.mMinimum = rate;
-            desc.mSampleRateRange.mMaximum = rate;
-            formats.push_back(desc);
-        }
-        stream->SetAvailablePhysicalFormatsAsync(formats);
-        stream->SetAvailableVirtualFormatsAsync(formats);
+    // 両方向の stream に同じ available formats を適用
+    std::vector<AudioStreamRangedDescription> formats;
+    formats.reserve(std::size(kSupportedSampleRates));
+    for (Float64 rate : kSupportedSampleRates) {
+        AudioStreamRangedDescription desc{};
+        desc.mFormat = MakeFloat32StereoASBD(rate);
+        desc.mSampleRateRange.mMinimum = rate;
+        desc.mSampleRateRange.mMaximum = rate;
+        formats.push_back(desc);
+    }
+    if (auto s = device->GetStreamByIndex(aspl::Direction::Output, 0)) {
+        s->SetAvailablePhysicalFormatsAsync(formats);
+        s->SetAvailableVirtualFormatsAsync(formats);
+    }
+    if (auto s = device->GetStreamByIndex(aspl::Direction::Input, 0)) {
+        s->SetAvailablePhysicalFormatsAsync(formats);
+        s->SetAvailableVirtualFormatsAsync(formats);
     }
 
     auto handler = std::make_shared<Handler>();
