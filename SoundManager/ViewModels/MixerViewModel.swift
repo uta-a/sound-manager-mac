@@ -7,15 +7,20 @@ import Observation
 final class MixerViewModel {
     private let client: AudioObjectClientProtocol
     private var suppressVolumeWrite = false
+    private var suppressDeviceWrite = false
+    private var defaultOutputListener: PropertyListenerHandle?
+    private var volumeListener: PropertyListenerHandle?
 
     private(set) var outputDevices: [AudioDevice] = []
     private(set) var volumeIsReadable: Bool = true
 
     var selectedOutputID: AudioDeviceID? {
         didSet {
+            guard !suppressDeviceWrite else { return }
             guard let id = selectedOutputID, id != oldValue else { return }
             if client.setDefaultOutputDevice(id: id) {
                 refreshVolume()
+                installVolumeListener()
             }
         }
     }
@@ -31,30 +36,73 @@ final class MixerViewModel {
     init(client: AudioObjectClientProtocol = AudioObjectClient()) {
         self.client = client
         refresh()
+        startObservingSystem()
     }
 
     func refresh() {
         outputDevices = client.enumerateOutputDevices()
 
         let currentDefault = client.getDefaultOutputDevice()
-        suppressVolumeWrite = true
-        selectedOutputID = currentDefault
-        suppressVolumeWrite = false
-
+        withSuppressedWrites {
+            selectedOutputID = currentDefault
+        }
         refreshVolume()
     }
 
-    private func refreshVolume() {
-        suppressVolumeWrite = true
-        defer { suppressVolumeWrite = false }
+    private func startObservingSystem() {
+        defaultOutputListener = client.addDefaultOutputDeviceListener { [weak self] in
+            self?.onDefaultOutputDeviceChanged()
+        }
+        installVolumeListener()
+    }
 
-        guard let id = selectedOutputID,
-              let value = client.getOutputVolumeScalar(id: id) else {
-            volumeIsReadable = false
-            volume = 0
+    private func onDefaultOutputDeviceChanged() {
+        let newDefault = client.getDefaultOutputDevice()
+        guard newDefault != selectedOutputID else {
+            refreshVolume()
             return
         }
-        volumeIsReadable = true
-        volume = Double(value)
+        withSuppressedWrites {
+            selectedOutputID = newDefault
+        }
+        refreshVolume()
+        installVolumeListener()
+    }
+
+    private func installVolumeListener() {
+        volumeListener = nil
+        guard let id = selectedOutputID else { return }
+        volumeListener = client.addOutputVolumeListener(id: id) { [weak self] in
+            self?.refreshVolume()
+        }
+    }
+
+    private func refreshVolume() {
+        guard let id = selectedOutputID,
+              let value = client.getOutputVolumeScalar(id: id) else {
+            withSuppressedWrites {
+                volumeIsReadable = false
+                volume = 0
+            }
+            return
+        }
+        let newVolume = Double(value)
+        guard abs(newVolume - volume) > 0.0001 || !volumeIsReadable else { return }
+        withSuppressedWrites {
+            volumeIsReadable = true
+            volume = newVolume
+        }
+    }
+
+    private func withSuppressedWrites(_ body: () -> Void) {
+        let previousVolume = suppressVolumeWrite
+        let previousDevice = suppressDeviceWrite
+        suppressVolumeWrite = true
+        suppressDeviceWrite = true
+        defer {
+            suppressVolumeWrite = previousVolume
+            suppressDeviceWrite = previousDevice
+        }
+        body()
     }
 }

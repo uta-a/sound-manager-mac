@@ -7,6 +7,13 @@ protocol AudioObjectClientProtocol {
     func setDefaultOutputDevice(id: AudioDeviceID) -> Bool
     func getOutputVolumeScalar(id: AudioDeviceID) -> Float?
     func setOutputVolumeScalar(id: AudioDeviceID, volume: Float) -> Bool
+    func addDefaultOutputDeviceListener(_ handler: @escaping () -> Void) -> PropertyListenerHandle?
+    func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle?
+}
+
+extension AudioObjectClientProtocol {
+    func addDefaultOutputDeviceListener(_ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
+    func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? { nil }
 }
 
 enum AudioScope {
@@ -20,6 +27,29 @@ enum AudioScope {
         case .input: return kAudioDevicePropertyScopeInput
         case .output: return kAudioDevicePropertyScopeOutput
         }
+    }
+}
+
+final class PropertyListenerHandle {
+    private let objectID: AudioObjectID
+    private var address: AudioObjectPropertyAddress
+    private let block: AudioObjectPropertyListenerBlock
+    private let queue: DispatchQueue
+
+    init(
+        objectID: AudioObjectID,
+        address: AudioObjectPropertyAddress,
+        queue: DispatchQueue,
+        block: @escaping AudioObjectPropertyListenerBlock
+    ) {
+        self.objectID = objectID
+        self.address = address
+        self.queue = queue
+        self.block = block
+    }
+
+    deinit {
+        AudioObjectRemovePropertyListenerBlock(objectID, &address, queue, block)
     }
 }
 
@@ -45,11 +75,10 @@ struct AudioObjectClient: AudioObjectClientProtocol {
         )
         var value = id
         let size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let status = AudioObjectSetPropertyData(
+        return AudioObjectSetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
             &address, 0, nil, size, &value
-        )
-        return status == noErr
+        ) == noErr
     }
 
     func getOutputVolumeScalar(id: AudioDeviceID) -> Float? {
@@ -80,7 +109,51 @@ struct AudioObjectClient: AudioObjectClientProtocol {
         return AudioObjectSetPropertyData(id, &address, 0, nil, size, &value) == noErr
     }
 
+    func addDefaultOutputDeviceListener(_ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        let address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        return addListener(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            address: address,
+            handler: handler
+        )
+    }
+
+    func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(id, &address) else { return nil }
+        return addListener(objectID: id, address: address, handler: handler)
+    }
+
     // MARK: - Private helpers
+
+    private func addListener(
+        objectID: AudioObjectID,
+        address: AudioObjectPropertyAddress,
+        handler: @escaping () -> Void
+    ) -> PropertyListenerHandle? {
+        var mutableAddress = address
+        let block: AudioObjectPropertyListenerBlock = { _, _ in
+            handler()
+        }
+        let status = AudioObjectAddPropertyListenerBlock(
+            objectID, &mutableAddress, .main, block
+        )
+        guard status == noErr else { return nil }
+        return PropertyListenerHandle(
+            objectID: objectID,
+            address: address,
+            queue: .main,
+            block: block
+        )
+    }
 
     private func listAllDeviceIDs() -> [AudioDeviceID] {
         var address = AudioObjectPropertyAddress(
