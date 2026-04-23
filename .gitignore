@@ -7,6 +7,10 @@ Icon?
 # Xcode
 build/
 DerivedData/
+
+# xcodegen 生成物 (project.yml からビルド前に再生成するため)
+*.xcodeproj
+SoundManager/Info.generated.plist
 *.pbxuser
 !default.pbxuser
 *.mode1v3
