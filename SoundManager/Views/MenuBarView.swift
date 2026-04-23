@@ -116,22 +116,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.tertiary)
             } else {
                 ForEach(vm.activeApps.prefix(8)) { app in
-                    HStack(spacing: 8) {
-                        if let icon = app.icon {
-                            Image(nsImage: icon)
-                                .resizable()
-                                .interpolation(.high)
-                                .frame(width: 18, height: 18)
-                        } else {
-                            Image(systemName: "app")
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 18, height: 18)
-                        }
-                        Text(app.displayName)
-                            .font(.caption)
-                            .lineLimit(1)
-                        Spacer()
-                    }
+                    activeAppRow(app)
                 }
                 if vm.activeApps.count > 8 {
                     Text("…他 \(vm.activeApps.count - 8) 件")
@@ -140,6 +125,47 @@ struct MenuBarView: View {
                 }
             }
         }
+    }
+
+    private func activeAppRow(_ app: ActiveApp) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                if let icon = app.icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: "app")
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 18, height: 18)
+                }
+                Text(app.displayName)
+                    .font(.caption)
+                    .lineLimit(1)
+                Spacer()
+                Text(String(format: "%.0f%%", vm.volume(for: app.bundleID) * 100))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.fill")
+                    .foregroundStyle(.tertiary)
+                    .font(.caption2)
+                    .frame(width: 18)
+                Slider(
+                    value: Binding<Double>(
+                        get: { vm.volume(for: app.bundleID) },
+                        set: { vm.setVolume($0, for: app.bundleID) }
+                    ),
+                    in: 0...1
+                )
+                Image(systemName: "speaker.wave.3.fill")
+                    .foregroundStyle(.tertiary)
+                    .font(.caption2)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private var footer: some View {

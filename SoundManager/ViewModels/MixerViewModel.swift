@@ -21,6 +21,22 @@ final class MixerViewModel {
     private(set) var activeApps: [ActiveApp] = []
     private(set) var soundManagerDeviceID: AudioDeviceID?
 
+    /// per-app 音量状態。bundleID → [0.0, 1.0] の値を保持する。
+    /// M3 段階では UI のみ保存し、実際のオーディオ gain 反映は M4 で driver 側と連携する。
+    private var perAppVolumes: [String: Double] = [:]
+
+    /// 指定 bundleID の現在音量 (未設定は 1.0 = unity)。
+    func volume(for bundleID: String) -> Double {
+        perAppVolumes[bundleID] ?? 1.0
+    }
+
+    /// 指定 bundleID の音量を更新する。M4 で driver に送信する予定。
+    func setVolume(_ value: Double, for bundleID: String) {
+        let clamped = max(0, min(1, value))
+        perAppVolumes[bundleID] = clamped
+        // TODO(M4): driver の kSMCustomPropertyAppVolumes 相当に反映する
+    }
+
     var selectedOutputID: AudioDeviceID? {
         didSet {
             guard !suppressDeviceWrite else { return }

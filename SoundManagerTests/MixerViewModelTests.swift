@@ -249,6 +249,49 @@ struct MixerViewModelTests {
         #expect(vm.activeClients.first?.bundleID == "com.apple.Music")
     }
 
+    // MARK: - per-app volume (UI 状態、M4 で driver 連携予定)
+
+    @Test
+    func perAppVolume_defaultsToUnityWhenUnset() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [AudioDevice.makeStub(id: 10, name: "A")]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.5]
+        let vm = MixerViewModel(client: mock)
+
+        #expect(vm.volume(for: "com.example.app") == 1.0)
+    }
+
+    @Test
+    func perAppVolume_persistsValuePerBundleID() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [AudioDevice.makeStub(id: 10, name: "A")]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.5]
+        let vm = MixerViewModel(client: mock)
+
+        vm.setVolume(0.3, for: "com.a")
+        vm.setVolume(0.8, for: "com.b")
+
+        #expect(abs(vm.volume(for: "com.a") - 0.3) < 0.0001)
+        #expect(abs(vm.volume(for: "com.b") - 0.8) < 0.0001)
+    }
+
+    @Test
+    func perAppVolume_clampsOutOfRange() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [AudioDevice.makeStub(id: 10, name: "A")]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.5]
+        let vm = MixerViewModel(client: mock)
+
+        vm.setVolume(-0.5, for: "com.a")
+        vm.setVolume(1.5, for: "com.b")
+
+        #expect(vm.volume(for: "com.a") == 0.0)
+        #expect(vm.volume(for: "com.b") == 1.0)
+    }
+
     @Test
     func activeClients_updateWhenListenerFires() {
         let mock = MockAudioObjectClient()
