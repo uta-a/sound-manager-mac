@@ -1,3 +1,4 @@
+import AppKit
 import CoreAudio
 import Foundation
 import Observation
@@ -6,6 +7,8 @@ import Observation
 @MainActor
 final class MixerViewModel {
     private let client: AudioObjectClientProtocol
+    private let runningApps: RunningAppsMonitor
+
     private var suppressVolumeWrite = false
     private var suppressDeviceWrite = false
     private var defaultOutputListener: PropertyListenerHandle?
@@ -15,6 +18,7 @@ final class MixerViewModel {
     private(set) var outputDevices: [AudioDevice] = []
     private(set) var volumeIsReadable: Bool = true
     private(set) var activeClients: [ActiveClient] = []
+    private(set) var activeApps: [ActiveApp] = []
     private(set) var soundManagerDeviceID: AudioDeviceID?
 
     var selectedOutputID: AudioDeviceID? {
@@ -38,6 +42,10 @@ final class MixerViewModel {
 
     init(client: AudioObjectClientProtocol = AudioObjectClient()) {
         self.client = client
+        self.runningApps = RunningAppsMonitor()
+        self.runningApps.onChange = { [weak self] in
+            self?.rebuildActiveApps()
+        }
         refresh()
         startObservingSystem()
     }
@@ -110,9 +118,11 @@ final class MixerViewModel {
     private func refreshActiveClients() {
         guard let id = soundManagerDeviceID else {
             activeClients = []
+            rebuildActiveApps()
             return
         }
         activeClients = client.getActiveClients(deviceID: id) ?? []
+        rebuildActiveApps()
     }
 
     private func installActiveClientsListener() {
@@ -120,6 +130,15 @@ final class MixerViewModel {
         guard let id = soundManagerDeviceID else { return }
         activeClientsListener = client.addActiveClientsListener(deviceID: id) { [weak self] in
             self?.refreshActiveClients()
+        }
+    }
+
+    // MARK: - ActiveApp: raw ActiveClient をフィルタ + グルーピング
+
+    private func rebuildActiveApps() {
+        activeApps = ProcessGrouping.buildActiveApps(from: activeClients) { [runningApps] bundleID in
+            guard let info = runningApps.appsByBundleID[bundleID] else { return nil }
+            return (info.displayName, info.icon)
         }
     }
 

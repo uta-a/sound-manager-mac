@@ -97,11 +97,11 @@ struct MenuBarView: View {
     private var activeClientsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("SoundManager クライアント")
+                Text("再生中のアプリ")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(vm.activeClients.count)")
+                Text("\(vm.activeApps.count)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
@@ -110,26 +110,31 @@ struct MenuBarView: View {
                 Text("SoundManagerDriver が未インストールです")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-            } else if vm.activeClients.isEmpty {
-                Text("(接続中のクライアントなし)")
+            } else if vm.activeApps.isEmpty {
+                Text("(再生中のアプリなし)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             } else {
-                ForEach(vm.activeClients.prefix(6)) { c in
-                    HStack(spacing: 6) {
-                        Text(c.bundleID.isEmpty ? "pid \(c.pid)" : c.bundleID)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                ForEach(vm.activeApps.prefix(8)) { app in
+                    HStack(spacing: 8) {
+                        if let icon = app.icon {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: 18, height: 18)
+                        } else {
+                            Image(systemName: "app")
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 18, height: 18)
+                        }
+                        Text(app.displayName)
+                            .font(.caption)
                             .lineLimit(1)
-                            .truncationMode(.middle)
                         Spacer()
-                        Text("#\(c.pid)")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
                     }
                 }
-                if vm.activeClients.count > 6 {
-                    Text("…他 \(vm.activeClients.count - 6) 件")
+                if vm.activeApps.count > 8 {
+                    Text("…他 \(vm.activeApps.count - 8) 件")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
