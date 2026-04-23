@@ -11,6 +11,11 @@ final class MockAudioObjectClient: AudioObjectClientProtocol {
     private(set) var setVolumeCalls: [(id: AudioDeviceID, volume: Float)] = []
     private(set) var enumerateCount = 0
 
+    // Listener 発火を模擬するためのキャプチャ
+    var capturedDefaultOutputListener: (() -> Void)?
+    var capturedVolumeListener: (() -> Void)?
+    var capturedVolumeListenerDeviceID: AudioDeviceID?
+
     func enumerateOutputDevices() -> [AudioDevice] {
         enumerateCount += 1
         return outputDevicesToReturn
@@ -36,8 +41,16 @@ final class MockAudioObjectClient: AudioObjectClientProtocol {
         return true
     }
 
-    // Listener メソッドは AudioObjectClientProtocol の extension で nil を
-    // 返すデフォルト実装が提供されているため、override しない。
+    func addDefaultOutputDeviceListener(_ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        capturedDefaultOutputListener = handler
+        return nil
+    }
+
+    func addOutputVolumeListener(id: AudioDeviceID, _ handler: @escaping () -> Void) -> PropertyListenerHandle? {
+        capturedVolumeListener = handler
+        capturedVolumeListenerDeviceID = id
+        return nil
+    }
 }
 
 extension AudioDevice {

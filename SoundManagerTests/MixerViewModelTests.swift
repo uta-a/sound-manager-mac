@@ -134,6 +134,69 @@ struct MixerViewModelTests {
         #expect(mock.setVolumeCalls.count == setVolumeBaseline)
     }
 
+    // MARK: - 外部変化 (CoreAudio property listener 経由)
+
+    @Test
+    func externalDefaultOutputChange_updatesSelectionWithoutCallingSetter() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [
+            AudioDevice.makeStub(id: 10, name: "A"),
+            AudioDevice.makeStub(id: 20, name: "B")
+        ]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.3, 20: 0.7]
+
+        let vm = MixerViewModel(client: mock)
+        let setDefaultBaseline = mock.setDefaultOutputCalls.count
+
+        // システム設定から出力デバイスが切替えられた状況を模擬
+        mock.defaultOutputDeviceToReturn = 20
+        mock.capturedDefaultOutputListener?()
+
+        #expect(vm.selectedOutputID == 20)
+        #expect(abs(vm.volume - 0.7) < 0.0001)
+        // UI 起点ではないので setDefaultOutput は呼ばれない (suppressDeviceWrite)
+        #expect(mock.setDefaultOutputCalls.count == setDefaultBaseline)
+    }
+
+    @Test
+    func externalVolumeChange_updatesSliderWithoutCallingSetter() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [AudioDevice.makeStub(id: 10, name: "A")]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.3]
+
+        let vm = MixerViewModel(client: mock)
+        let setVolumeBaseline = mock.setVolumeCalls.count
+
+        // Control Center や外部アプリから音量が変更された状況を模擬
+        mock.volumesByID[10] = 0.8
+        mock.capturedVolumeListener?()
+
+        #expect(abs(vm.volume - 0.8) < 0.0001)
+        // 外部変更の反映でユーザー didSet は走らない (suppressVolumeWrite)
+        #expect(mock.setVolumeCalls.count == setVolumeBaseline)
+    }
+
+    @Test
+    func volumeListener_rebindsToNewDeviceOnSelectionChange() {
+        let mock = MockAudioObjectClient()
+        mock.outputDevicesToReturn = [
+            AudioDevice.makeStub(id: 10, name: "A"),
+            AudioDevice.makeStub(id: 20, name: "B")
+        ]
+        mock.defaultOutputDeviceToReturn = 10
+        mock.volumesByID = [10: 0.3, 20: 0.7]
+
+        let vm = MixerViewModel(client: mock)
+
+        #expect(mock.capturedVolumeListenerDeviceID == 10)
+
+        vm.selectedOutputID = 20
+
+        #expect(mock.capturedVolumeListenerDeviceID == 20)
+    }
+
     // MARK: - 値型契約
 
     @Test
@@ -144,5 +207,19 @@ struct MixerViewModelTests {
 
         #expect(a == b)
         #expect(a != c)
+    }
+
+    @Test
+    func audioDevice_capabilityFlagsReflectChannelCounts() {
+        let speaker = AudioDevice.makeStub(id: 10, name: "Speaker", outputChannels: 2, inputChannels: 0)
+        let mic = AudioDevice.makeStub(id: 20, name: "Mic", outputChannels: 0, inputChannels: 1)
+        let combo = AudioDevice.makeStub(id: 30, name: "Headset", outputChannels: 2, inputChannels: 1)
+
+        #expect(speaker.isOutputCapable)
+        #expect(!speaker.isInputCapable)
+        #expect(!mic.isOutputCapable)
+        #expect(mic.isInputCapable)
+        #expect(combo.isOutputCapable)
+        #expect(combo.isInputCapable)
     }
 }
