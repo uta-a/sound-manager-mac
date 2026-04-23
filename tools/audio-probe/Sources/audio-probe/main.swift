@@ -47,3 +47,23 @@ if let outputID = defaultOutputID,
         print("  System volume: (not readable on this device)")
     }
 }
+
+// SoundManagerDriver が公開する kSMCustomPropertyActiveClients を
+// 対応する全デバイス (出力のみ) について読み出す。
+print("")
+print("=== SoundManager Active Clients (by device) ===")
+var foundAny = false
+for id in devices {
+    guard client.getChannelCount(id: id, scope: .output) > 0 else { continue }
+    guard let activeClients = ActiveClientsReader.read(deviceID: id) else { continue }
+    foundAny = true
+    let name = client.getDeviceName(id: id) ?? "<unknown>"
+    print("[#\(id)] \(name): \(activeClients.count) client(s)")
+    for c in activeClients {
+        let bundle = c.bundleID.isEmpty ? "<no bundle>" : c.bundleID
+        print("   pid=\(c.pid)  bundleID=\(bundle)")
+    }
+}
+if !foundAny {
+    print("(no device exposes kSMCustomPropertyActiveClients — install SoundManagerDriver to see this section)")
+}
